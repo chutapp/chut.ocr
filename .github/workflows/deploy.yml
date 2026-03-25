@@ -1,0 +1,47 @@
+name: Test & Deploy OCR Server
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install fastapi uvicorn python-multipart httpx pytest pytest-asyncio
+
+      - name: Run tests
+        env:
+          OCR_API_KEY: test-key-for-ci
+        run: python -m pytest tests/ -v
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to GPU server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.OCR_SERVER_HOST }}
+          username: ${{ secrets.OCR_SERVER_USER }}
+          key: ${{ secrets.OCR_SERVER_SSH_KEY }}
+          script: |
+            cd /opt/ocr-server
+            git pull origin main 2>/dev/null || git clone https://github.com/chutapp/chut.ocr.git .
+            cp server.py config.py /opt/ocr-server/ 2>/dev/null || true
+            systemctl restart ocr-server
+            sleep 5
+            curl -sf http://localhost:8090/health && echo "Deploy OK" || echo "Deploy FAILED"
