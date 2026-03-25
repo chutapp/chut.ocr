@@ -65,3 +65,4 @@ Set these GitHub secrets:
 | `OCR_API_KEY` | random | API authentication key |
 | `OCR_RATE_LIMIT` | 60 | Max requests per minute |
 | `MAX_FILE_SIZE_MB` | 20 | Max upload size |
+# Version 1.0.1 — CI/CD test
