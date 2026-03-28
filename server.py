@@ -138,8 +138,25 @@ def _get_ocr():
     return _ocr_engine
 
 
-def _run_ocr(image_path: str) -> list[dict]:
-    """Run OCR and return normalized results as list of {text, confidence, bbox}."""
+def _pdf_to_images(pdf_path: str) -> list[str]:
+    """Convert PDF pages to temporary PNG images. Returns list of image paths."""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(pdf_path)
+    image_paths = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        # 300 DPI for high quality OCR
+        pix = page.get_pixmap(dpi=300)
+        img_path = f"{pdf_path}_page{page_num}.png"
+        pix.save(img_path)
+        image_paths.append(img_path)
+    doc.close()
+    return image_paths
+
+
+def _ocr_single_image(image_path: str) -> list[dict]:
+    """Run OCR on a single image and return normalized results."""
     ocr = _get_ocr()
 
     try:
@@ -151,23 +168,18 @@ def _run_ocr(image_path: str) -> list[dict]:
     if not results:
         return lines
 
-    # PaddleOCR v2: results[0] = [[bbox, (text, conf)], ...]
-    # PaddleOCR v3: results = [{"text": ..., "score": ..., "bbox": ...}, ...] or similar
     page = results[0] if isinstance(results, list) and results else results
-
     if not page:
         return lines
 
     for item in page:
         if isinstance(item, dict):
-            # v3 format
             lines.append({
                 "text": item.get("text", item.get("rec_text", "")),
                 "confidence": round(item.get("score", item.get("rec_score", 0.0)), 4),
                 "bbox": item.get("dt_polys", item.get("bbox", [])),
             })
         elif isinstance(item, (list, tuple)) and len(item) >= 2:
-            # v2 format: [bbox, (text, confidence)]
             bbox = item[0]
             text_info = item[1]
             if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
@@ -178,6 +190,26 @@ def _run_ocr(image_path: str) -> list[dict]:
                 })
 
     return lines
+
+
+def _run_ocr(file_path: str) -> list[dict]:
+    """Run OCR on an image or PDF. PDFs are converted to images first."""
+    if file_path.lower().endswith(".pdf"):
+        image_paths = _pdf_to_images(file_path)
+        all_lines = []
+        try:
+            for img_path in image_paths:
+                all_lines.extend(_ocr_single_image(img_path))
+        finally:
+            import os
+            for img_path in image_paths:
+                try:
+                    os.unlink(img_path)
+                except OSError:
+                    pass
+        return all_lines
+    else:
+        return _ocr_single_image(file_path)
 
 
 # ─── Models ──────────────────────────────────────────────────────────────────
