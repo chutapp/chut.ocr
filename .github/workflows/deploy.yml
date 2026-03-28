@@ -44,12 +44,9 @@ jobs:
             cd /opt/ocr-server
             git pull origin main 2>/dev/null || git clone https://github.com/chutapp/chut.ocr.git .
 
-            # Configure OCR API keys in systemd service
+            # Configure OCR API keys in systemd drop-in
             mkdir -p /etc/systemd/system/ocr-server.service.d
-            cat > /etc/systemd/system/ocr-server.service.d/env.conf << 'ENVEOF'
-            [Service]
-            Environment="OCR_API_KEYS=optii:${{ secrets.OCR_INTERNAL_KEY }}"
-            ENVEOF
+            printf '[Service]\nEnvironment="OCR_API_KEYS=optii:${{ secrets.OCR_INTERNAL_KEY }}"\n' > /etc/systemd/system/ocr-server.service.d/env.conf
             systemctl daemon-reload
 
             # Deploy app
