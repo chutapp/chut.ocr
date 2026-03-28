@@ -121,12 +121,63 @@ def _get_ocr():
     global _ocr_engine
     if _ocr_engine is None:
         from paddleocr import PaddleOCR
+        import inspect
 
-        _ocr_engine = PaddleOCR(
-            use_textline_orientation=True,
-            lang="fr",
-        )
+        params = inspect.signature(PaddleOCR.__init__).parameters
+        kwargs: dict = {"lang": "fr"}
+
+        if "use_textline_orientation" in params:
+            kwargs["use_textline_orientation"] = True
+        elif "use_angle_cls" in params:
+            kwargs["use_angle_cls"] = True
+
+        if "show_log" in params:
+            kwargs["show_log"] = False
+
+        _ocr_engine = PaddleOCR(**kwargs)
     return _ocr_engine
+
+
+def _run_ocr(image_path: str) -> list[dict]:
+    """Run OCR and return normalized results as list of {text, confidence, bbox}."""
+    ocr = _get_ocr()
+
+    try:
+        results = ocr.ocr(image_path, cls=True)
+    except TypeError:
+        results = ocr.ocr(image_path)
+
+    lines = []
+    if not results:
+        return lines
+
+    # PaddleOCR v2: results[0] = [[bbox, (text, conf)], ...]
+    # PaddleOCR v3: results = [{"text": ..., "score": ..., "bbox": ...}, ...] or similar
+    page = results[0] if isinstance(results, list) and results else results
+
+    if not page:
+        return lines
+
+    for item in page:
+        if isinstance(item, dict):
+            # v3 format
+            lines.append({
+                "text": item.get("text", item.get("rec_text", "")),
+                "confidence": round(item.get("score", item.get("rec_score", 0.0)), 4),
+                "bbox": item.get("dt_polys", item.get("bbox", [])),
+            })
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            # v2 format: [bbox, (text, confidence)]
+            bbox = item[0]
+            text_info = item[1]
+            if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
+                lines.append({
+                    "text": text_info[0],
+                    "confidence": round(text_info[1], 4),
+                    "bbox": bbox,
+                })
+
+    return lines
 
 
 # ─── Models ──────────────────────────────────────────────────────────────────
@@ -200,29 +251,10 @@ async def extract_text(
         tmp_path = tmp.name
 
     try:
-        ocr = _get_ocr()
-        results = ocr.ocr(tmp_path, cls=True)
+        parsed_lines = _run_ocr(tmp_path)
 
-        lines = []
-        full_text_parts = []
-        total_confidence = 0.0
-        count = 0
-
-        if results and results[0]:
-            for line_result in results[0]:
-                bbox = line_result[0]
-                text = line_result[1][0]
-                conf = line_result[1][1]
-
-                lines.append({
-                    "text": text,
-                    "confidence": round(conf, 4),
-                    "bbox": bbox,
-                })
-                full_text_parts.append(text)
-                total_confidence += conf
-                count += 1
-
+        total_confidence = sum(l["confidence"] for l in parsed_lines)
+        count = len(parsed_lines)
         elapsed_ms = int((time.time() - start) * 1000)
         avg_confidence = total_confidence / count if count > 0 else 0.0
 
@@ -233,8 +265,8 @@ async def extract_text(
 
         return OCRResult(
             success=True,
-            text="\n".join(full_text_parts),
-            lines=lines,
+            text="\n".join(l["text"] for l in parsed_lines),
+            lines=parsed_lines,
             confidence=round(avg_confidence, 4),
             processing_time_ms=elapsed_ms,
             file_hash=file_hash,
@@ -280,12 +312,8 @@ async def extract_invoice(
         tmp_path = tmp.name
 
     try:
-        ocr = _get_ocr()
-        results = ocr.ocr(tmp_path, cls=True)
-
-        raw_text = ""
-        if results and results[0]:
-            raw_text = "\n".join(line[1][0] for line in results[0])
+        parsed_lines = _run_ocr(tmp_path)
+        raw_text = "\n".join(l["text"] for l in parsed_lines)
 
         fields = _extract_invoice_fields(raw_text)
         elapsed_ms = int((time.time() - start) * 1000)
