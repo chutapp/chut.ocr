@@ -49,6 +49,9 @@ jobs:
             printf '[Service]\nEnvironment="OCR_API_KEYS=optii:${{ secrets.OCR_INTERNAL_KEY }}"\n' > /etc/systemd/system/ocr-server.service.d/env.conf
             systemctl daemon-reload
 
+            # Install/update dependencies
+            pip install -r requirements.txt --quiet 2>/dev/null || true
+
             # Deploy app
             systemctl restart ocr-server
 
@@ -62,4 +65,37 @@ jobs:
 
             # Health check
             sleep 5
-            curl -sf http://localhost:8090/health && echo "Deploy OK" || echo "Deploy FAILED"
+            curl -sf http://localhost:8090/health && echo "Health OK" || { echo "Health FAILED"; exit 1; }
+
+      - name: Smoke test OCR extraction
+        env:
+          OCR_INTERNAL_KEY: ${{ secrets.OCR_INTERNAL_KEY }}
+          OCR_SERVER_HOST: ${{ secrets.OCR_SERVER_HOST }}
+        run: |
+          # Create a test image with text
+          sudo apt-get install -y python3-pil > /dev/null 2>&1 || true
+          python3 -c "
+          from PIL import Image, ImageDraw
+          img = Image.new('RGB', (400, 100), 'white')
+          draw = ImageDraw.Draw(img)
+          draw.text((10, 30), 'FACTURE N 2024-001 TVA BE0202239951', fill='black')
+          img.save('/tmp/smoke_test.png')
+          "
+
+          # Test extract endpoint
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://ocr.chut.me/ocr/extract" \
+            -H "X-API-Key: $OCR_INTERNAL_KEY" \
+            -F "file=@/tmp/smoke_test.png")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $BODY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "OCR smoke test FAILED with status $HTTP_CODE"
+            exit 1
+          fi
+
+          echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['success']==True; print(f'OCR OK: {len(d[\"lines\"])} lines, {d[\"confidence\"]:.2%} confidence, {d[\"processing_time_ms\"]}ms')"

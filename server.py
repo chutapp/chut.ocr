@@ -123,9 +123,8 @@ def _get_ocr():
         from paddleocr import PaddleOCR
 
         _ocr_engine = PaddleOCR(
-            use_angle_cls=True,
-            lang="fr",  # Primary language; handles multilingual
-            show_log=False,
+            use_textline_orientation=True,
+            lang="fr",
         )
     return _ocr_engine
 
