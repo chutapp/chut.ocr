@@ -39,9 +39,30 @@ jobs:
           username: ${{ secrets.OCR_SERVER_USER }}
           key: ${{ secrets.OCR_SERVER_SSH_KEY }}
           script: |
+            set -e
+
             cd /opt/ocr-server
             git pull origin main 2>/dev/null || git clone https://github.com/chutapp/chut.ocr.git .
-            cp server.py config.py /opt/ocr-server/ 2>/dev/null || true
+
+            # Configure OCR API keys in systemd service
+            mkdir -p /etc/systemd/system/ocr-server.service.d
+            cat > /etc/systemd/system/ocr-server.service.d/env.conf << 'ENVEOF'
+            [Service]
+            Environment="OCR_API_KEYS=optii:${{ secrets.OCR_INTERNAL_KEY }}"
+            ENVEOF
+            systemctl daemon-reload
+
+            # Deploy app
             systemctl restart ocr-server
+
+            # Deploy nginx config
+            cp nginx/ocr.chut.me.conf /etc/nginx/sites-available/ocr.chut.me
+            ln -sf /etc/nginx/sites-available/ocr.chut.me /etc/nginx/sites-enabled/ocr.chut.me
+            nginx -t && systemctl reload nginx
+
+            # Firewall: block port 8080 if open
+            ufw deny 8080/tcp 2>/dev/null || true
+
+            # Health check
             sleep 5
             curl -sf http://localhost:8090/health && echo "Deploy OK" || echo "Deploy FAILED"

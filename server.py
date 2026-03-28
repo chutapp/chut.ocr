@@ -12,47 +12,104 @@ Endpoints:
 """
 
 import hashlib
-import io
+import hmac
+import logging
 import tempfile
 import time
+import uuid
+from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime
-from pathlib import Path
+from pathlib import PurePosixPath
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from config import API_KEY, MAX_FILE_SIZE_MB, MAX_REQUESTS_PER_MINUTE, SUPPORTED_LANGUAGES
+from config import API_KEYS, ALLOWED_ORIGINS, MAX_FILE_SIZE_MB, MAX_REQUESTS_PER_MINUTE, SUPPORTED_LANGUAGES
+
+logger = logging.getLogger("ocr-server")
+audit_logger = logging.getLogger("ocr-audit")
+
+ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp", ".pdf"}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Pre-load OCR model on startup."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+    logger.info("OCR Server starting...")
+    logger.info("Rate limit: %d/min", MAX_REQUESTS_PER_MINUTE)
+    logger.info("Active API keys: %d", len(API_KEYS))
+    try:
+        _get_ocr()
+        logger.info("PaddleOCR model loaded successfully")
+    except Exception as e:
+        logger.warning("PaddleOCR not available: %s", type(e).__name__)
+        logger.warning("Server will start but OCR endpoints will fail")
+    yield
+
 
 app = FastAPI(
     title="OCR Server",
     description="Secure document text extraction API",
-    version="1.0.0",
+    version="1.2.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    lifespan=lifespan,
 )
 
-# CORS — restrict in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Restrict to your domains in production
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["POST", "GET"],
     allow_headers=["X-API-Key", "Content-Type"],
 )
 
-# Rate limiting (simple in-memory)
-_request_log: list[float] = []
+# Rate limiting (per-IP, in-memory)
+_request_log: dict[str, list[float]] = defaultdict(list)
 
 
-def _check_rate_limit():
+def _get_client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _check_rate_limit(request: Request):
+    client_ip = _get_client_ip(request)
     now = time.time()
-    _request_log[:] = [t for t in _request_log if now - t < 60]
-    if len(_request_log) >= MAX_REQUESTS_PER_MINUTE:
+    log = _request_log[client_ip]
+    log[:] = [t for t in log if now - t < 60]
+    if len(log) >= MAX_REQUESTS_PER_MINUTE:
+        audit_logger.warning("rate_limit_exceeded ip=%s count=%d", client_ip, len(log))
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
-    _request_log.append(now)
+    log.append(now)
 
 
-def _verify_api_key(x_api_key: str = Header(None)):
-    if not x_api_key or x_api_key != API_KEY:
+def _verify_api_key(x_api_key: str = Header(None)) -> str:
+    """Verify API key against all active keys. Returns matched key ID for audit."""
+    if not x_api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
+    for key_id, key_value in API_KEYS.items():
+        if hmac.compare_digest(x_api_key, key_value):
+            return key_id
+    raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def _validate_file_extension(filename: str | None) -> str:
+    """Validate and return sanitized file suffix."""
+    safe_name = PurePosixPath(filename).name if filename else ""
+    suffix = PurePosixPath(safe_name).suffix.lower() if safe_name else ""
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
+    return suffix
 
 
 # ─── PaddleOCR Initialization ───────────────────────────────────────────────
@@ -116,12 +173,16 @@ def health():
 
 @app.post("/ocr/extract", response_model=OCRResult)
 async def extract_text(
+    request: Request,
     file: UploadFile = File(...),
     x_api_key: str = Header(None),
 ):
     """Extract raw text from an image or PDF. Returns lines with coordinates and confidence."""
-    _verify_api_key(x_api_key)
-    _check_rate_limit()
+    key_id = _verify_api_key(x_api_key)
+    _check_rate_limit(request)
+    suffix = _validate_file_extension(file.filename)
+    request_id = uuid.uuid4().hex[:12]
+    client_ip = _get_client_ip(request)
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_MB * 1024 * 1024:
@@ -130,9 +191,12 @@ async def extract_text(
     file_hash = hashlib.sha256(content).hexdigest()[:16]
     start = time.time()
 
-    # Save to temp file (PaddleOCR needs file path)
-    suffix = Path(file.filename).suffix if file.filename else ".png"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+    audit_logger.info(
+        "ocr_extract req=%s ip=%s key=%s file_hash=%s size_kb=%d type=%s",
+        request_id, client_ip, key_id, file_hash, len(content) // 1024, suffix,
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete_on_close=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
 
@@ -163,6 +227,11 @@ async def extract_text(
         elapsed_ms = int((time.time() - start) * 1000)
         avg_confidence = total_confidence / count if count > 0 else 0.0
 
+        audit_logger.info(
+            "ocr_extract_done req=%s lines=%d confidence=%.4f ms=%d",
+            request_id, count, avg_confidence, elapsed_ms,
+        )
+
         return OCRResult(
             success=True,
             text="\n".join(full_text_parts),
@@ -172,8 +241,11 @@ async def extract_text(
             file_hash=file_hash,
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OCR processing failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("OCR processing failed req=%s", request_id)
+        raise HTTPException(status_code=500, detail="OCR processing failed")
 
     finally:
         import os
@@ -182,22 +254,29 @@ async def extract_text(
 
 @app.post("/ocr/invoice", response_model=InvoiceFields)
 async def extract_invoice(
+    request: Request,
     file: UploadFile = File(...),
     x_api_key: str = Header(None),
 ):
     """Extract structured invoice fields from an image/PDF. Uses OCR + post-processing."""
-    _verify_api_key(x_api_key)
-    _check_rate_limit()
+    key_id = _verify_api_key(x_api_key)
+    _check_rate_limit(request)
+    suffix = _validate_file_extension(file.filename)
+    request_id = uuid.uuid4().hex[:12]
+    client_ip = _get_client_ip(request)
 
-    # First get raw text
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_MB * 1024 * 1024:
         raise HTTPException(status_code=413, detail=f"File too large (max {MAX_FILE_SIZE_MB}MB)")
 
     start = time.time()
 
-    suffix = Path(file.filename).suffix if file.filename else ".png"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+    audit_logger.info(
+        "ocr_invoice req=%s ip=%s key=%s size_kb=%d type=%s",
+        request_id, client_ip, key_id, len(content) // 1024, suffix,
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete_on_close=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
 
@@ -209,9 +288,13 @@ async def extract_invoice(
         if results and results[0]:
             raw_text = "\n".join(line[1][0] for line in results[0])
 
-        # Post-process: extract structured fields from raw text
         fields = _extract_invoice_fields(raw_text)
         elapsed_ms = int((time.time() - start) * 1000)
+
+        audit_logger.info(
+            "ocr_invoice_done req=%s ms=%d fields_found=%d",
+            request_id, elapsed_ms, len(fields),
+        )
 
         return InvoiceFields(
             success=True,
@@ -220,8 +303,11 @@ async def extract_invoice(
             **fields,
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Invoice extraction failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Invoice extraction failed req=%s", request_id)
+        raise HTTPException(status_code=500, detail="Invoice extraction failed")
 
     finally:
         import os
@@ -270,20 +356,3 @@ def _extract_invoice_fields(text: str) -> dict:
             break
 
     return fields
-
-
-# ─── Startup ─────────────────────────────────────────────────────────────────
-
-
-@app.on_event("startup")
-async def startup():
-    """Pre-load OCR model on startup."""
-    print(f"OCR Server starting...")
-    print(f"API Key: {API_KEY[:8]}...{API_KEY[-4:]}")
-    print(f"Rate limit: {MAX_REQUESTS_PER_MINUTE}/min")
-    try:
-        _get_ocr()
-        print("PaddleOCR model loaded successfully")
-    except Exception as e:
-        print(f"WARNING: PaddleOCR not available: {e}")
-        print("Server will start but OCR endpoints will fail")
