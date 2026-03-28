@@ -246,11 +246,11 @@ async def extract_text(
         request_id, client_ip, key_id, file_hash, len(content) // 1024, suffix,
     )
 
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete_on_close=False) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     try:
+        tmp.write(content)
+        tmp.close()
+        tmp_path = tmp.name
         parsed_lines = _run_ocr(tmp_path)
 
         total_confidence = sum(l["confidence"] for l in parsed_lines)
@@ -307,11 +307,11 @@ async def extract_invoice(
         request_id, client_ip, key_id, len(content) // 1024, suffix,
     )
 
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete_on_close=False) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
     try:
+        tmp.write(content)
+        tmp.close()
+        tmp_path = tmp.name
         parsed_lines = _run_ocr(tmp_path)
         raw_text = "\n".join(l["text"] for l in parsed_lines)
 

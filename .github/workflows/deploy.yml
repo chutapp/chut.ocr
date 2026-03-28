@@ -46,7 +46,7 @@ jobs:
 
             # Configure OCR API keys in systemd drop-in
             mkdir -p /etc/systemd/system/ocr-server.service.d
-            printf '[Service]\nEnvironment="OCR_API_KEYS=optii:${{ secrets.OCR_INTERNAL_KEY }}"\n' > /etc/systemd/system/ocr-server.service.d/env.conf
+            printf '[Service]\nEnvironment="OCR_API_KEYS=default:${{ secrets.OCR_API_KEY }},optii:${{ secrets.OCR_INTERNAL_KEY }}"\n' > /etc/systemd/system/ocr-server.service.d/env.conf
             systemctl daemon-reload
 
             # Install/update dependencies
