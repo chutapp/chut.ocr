@@ -95,8 +95,12 @@ def _set_cookies(response: Response, access_token: str, refresh_token: str) -> N
 
 
 def decode_session(request: Request) -> dict | None:
-    """Decode access token from cookie. Returns claims or None."""
+    """Decode access token from cookie or Authorization header. Returns claims or None."""
     token = request.cookies.get("optii_access")
+    if not token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:].strip()
     if not token:
         return None
     try:
