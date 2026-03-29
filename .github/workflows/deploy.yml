@@ -44,21 +44,9 @@ jobs:
             cd /opt/ocr-server
             git pull origin main 2>/dev/null || git clone https://github.com/chutapp/chut.ocr.git .
 
-            # Configure env vars in systemd drop-in
+            # Configure env vars in systemd drop-in (printf to avoid heredoc indentation)
             mkdir -p /etc/systemd/system/ocr-server.service.d
-            cat > /etc/systemd/system/ocr-server.service.d/env.conf << 'EOF'
-            [Service]
-            Environment="OPTII_INTERNAL_API_KEYS=default:${{ secrets.OCR_API_KEY }},optii:${{ secrets.OCR_INTERNAL_KEY }}"
-            Environment="OPTII_DB_HOST=${{ secrets.OPTII_DB_HOST }}"
-            Environment="OPTII_DB_PORT=5432"
-            Environment="OPTII_DB_USER=${{ secrets.OPTII_DB_USER }}"
-            Environment="OPTII_DB_PASSWORD=${{ secrets.OPTII_DB_PASSWORD }}"
-            Environment="OPTII_DB_NAME=optii"
-            Environment="OPTII_DB_SSL=true"
-            Environment="OPTII_AUTH_CLIENT_ID=${{ secrets.OPTII_AUTH_CLIENT_ID }}"
-            Environment="OPTII_AUTH_CLIENT_SECRET=${{ secrets.OPTII_AUTH_CLIENT_SECRET }}"
-            Environment="OPTII_CORS_ORIGINS=https://optii.eu,https://www.optii.eu"
-            EOF
+            printf '[Service]\nEnvironment="OPTII_INTERNAL_API_KEYS=default:${{ secrets.OCR_API_KEY }},optii:${{ secrets.OCR_INTERNAL_KEY }}"\nEnvironment="OPTII_DB_HOST=${{ secrets.OPTII_DB_HOST }}"\nEnvironment="OPTII_DB_PORT=5432"\nEnvironment="OPTII_DB_USER=${{ secrets.OPTII_DB_USER }}"\nEnvironment="OPTII_DB_PASSWORD=${{ secrets.OPTII_DB_PASSWORD }}"\nEnvironment="OPTII_DB_NAME=optii"\nEnvironment="OPTII_DB_SSL=true"\nEnvironment="OPTII_AUTH_CLIENT_ID=${{ secrets.OPTII_AUTH_CLIENT_ID }}"\nEnvironment="OPTII_AUTH_CLIENT_SECRET=${{ secrets.OPTII_AUTH_CLIENT_SECRET }}"\nEnvironment="OPTII_CORS_ORIGINS=https://optii.eu,https://www.optii.eu"\n' > /etc/systemd/system/ocr-server.service.d/env.conf
             systemctl daemon-reload
 
             # Install/update dependencies in venv
@@ -74,10 +62,16 @@ jobs:
             # Deploy nginx configs
             cp nginx/ocr.chut.me.conf /etc/nginx/sites-available/ocr.chut.me
             ln -sf /etc/nginx/sites-available/ocr.chut.me /etc/nginx/sites-enabled/ocr.chut.me
-            if [ -f nginx/api.optii.eu.conf ]; then
+
+            # Only deploy api.optii.eu if SSL cert exists
+            if [ -f /etc/letsencrypt/live/api.optii.eu/fullchain.pem ]; then
               cp nginx/api.optii.eu.conf /etc/nginx/sites-available/api.optii.eu
               ln -sf /etc/nginx/sites-available/api.optii.eu /etc/nginx/sites-enabled/api.optii.eu
+            else
+              echo "Skipping api.optii.eu nginx — SSL cert not yet provisioned"
+              rm -f /etc/nginx/sites-enabled/api.optii.eu
             fi
+
             nginx -t && systemctl reload nginx
 
             # Firewall
