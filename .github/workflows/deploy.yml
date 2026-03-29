@@ -78,8 +78,14 @@ jobs:
             ufw deny 8080/tcp 2>/dev/null || true
 
             # Health check
-            sleep 8
-            curl -sf http://localhost:8090/health && echo "Health OK" || { echo "Health FAILED"; exit 1; }
+            sleep 10
+            if curl -sf http://localhost:8090/health; then
+              echo "Health OK"
+            else
+              echo "Health FAILED — checking logs:"
+              journalctl -u ocr-server --no-pager -n 30
+              exit 1
+            fi
 
       - name: Smoke test OCR extraction
         env:
