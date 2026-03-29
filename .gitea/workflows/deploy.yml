@@ -15,7 +15,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install test dependencies
-        run: pip install fastapi uvicorn python-multipart httpx pytest pytest-asyncio pydantic-settings asyncpg PyJWT[crypto]
+        run: pip install fastapi uvicorn python-multipart httpx pytest pytest-asyncio pydantic-settings asyncpg "PyJWT[crypto]" --break-system-packages 2>/dev/null || pip install fastapi uvicorn python-multipart httpx pytest pytest-asyncio pydantic-settings asyncpg "PyJWT[crypto]"
 
       - name: Run tests
         env:
@@ -67,7 +67,7 @@ jobs:
         env:
           OCR_INTERNAL_KEY: ${{ secrets.OCR_INTERNAL_KEY }}
         run: |
-          pip install Pillow --quiet
+          pip install Pillow --quiet --break-system-packages 2>/dev/null || pip install Pillow --quiet
           python3 -c "
           from PIL import Image, ImageDraw
           img = Image.new('RGB', (400, 100), 'white')
