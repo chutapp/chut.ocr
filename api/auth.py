@@ -281,7 +281,13 @@ async def otp_verify(request: Request, response: Response):
     await _ensure_user(pool, claims["sub"], claims.get("email", ""))
 
     _set_cookies(response, tokens["access_token"], tokens["refresh_token"])
-    return {"ok": True, "user_id": claims["sub"], "email": claims.get("email", "")}
+    return {
+        "ok": True,
+        "user_id": claims["sub"],
+        "email": claims.get("email", ""),
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens["refresh_token"],
+    }
 
 
 @router.post("/otp-callback")
