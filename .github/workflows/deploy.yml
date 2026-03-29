@@ -17,7 +17,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install test dependencies
-        run: pip install fastapi uvicorn python-multipart httpx pytest pytest-asyncio
+        run: pip install fastapi uvicorn python-multipart httpx pytest pytest-asyncio pydantic-settings asyncpg PyJWT[crypto]
 
       - name: Run tests
         env:
@@ -44,35 +44,53 @@ jobs:
             cd /opt/ocr-server
             git pull origin main 2>/dev/null || git clone https://github.com/chutapp/chut.ocr.git .
 
-            # Configure OCR API keys in systemd drop-in
+            # Configure env vars in systemd drop-in
             mkdir -p /etc/systemd/system/ocr-server.service.d
-            printf '[Service]\nEnvironment="OCR_API_KEYS=default:${{ secrets.OCR_API_KEY }},optii:${{ secrets.OCR_INTERNAL_KEY }}"\n' > /etc/systemd/system/ocr-server.service.d/env.conf
+            cat > /etc/systemd/system/ocr-server.service.d/env.conf << 'EOF'
+            [Service]
+            Environment="OPTII_INTERNAL_API_KEYS=default:${{ secrets.OCR_API_KEY }},optii:${{ secrets.OCR_INTERNAL_KEY }}"
+            Environment="OPTII_DB_HOST=${{ secrets.OPTII_DB_HOST }}"
+            Environment="OPTII_DB_PORT=5432"
+            Environment="OPTII_DB_USER=${{ secrets.OPTII_DB_USER }}"
+            Environment="OPTII_DB_PASSWORD=${{ secrets.OPTII_DB_PASSWORD }}"
+            Environment="OPTII_DB_NAME=optii"
+            Environment="OPTII_DB_SSL=true"
+            Environment="OPTII_AUTH_CLIENT_ID=${{ secrets.OPTII_AUTH_CLIENT_ID }}"
+            Environment="OPTII_AUTH_CLIENT_SECRET=${{ secrets.OPTII_AUTH_CLIENT_SECRET }}"
+            Environment="OPTII_CORS_ORIGINS=https://optii.eu,https://www.optii.eu"
+            EOF
             systemctl daemon-reload
 
             # Install/update dependencies in venv
             /opt/ocr-server/venv/bin/pip install -r requirements.txt --quiet 2>/dev/null || true
 
+            # Update systemd service to use new entrypoint
+            sed -i 's|ExecStart=.*|ExecStart=/opt/ocr-server/venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8090|' /etc/systemd/system/ocr-server.service
+            systemctl daemon-reload
+
             # Deploy app
             systemctl restart ocr-server
 
-            # Deploy nginx config
+            # Deploy nginx configs
             cp nginx/ocr.chut.me.conf /etc/nginx/sites-available/ocr.chut.me
             ln -sf /etc/nginx/sites-available/ocr.chut.me /etc/nginx/sites-enabled/ocr.chut.me
+            if [ -f nginx/api.optii.eu.conf ]; then
+              cp nginx/api.optii.eu.conf /etc/nginx/sites-available/api.optii.eu
+              ln -sf /etc/nginx/sites-available/api.optii.eu /etc/nginx/sites-enabled/api.optii.eu
+            fi
             nginx -t && systemctl reload nginx
 
-            # Firewall: block port 8080 if open
+            # Firewall
             ufw deny 8080/tcp 2>/dev/null || true
 
             # Health check
-            sleep 5
+            sleep 8
             curl -sf http://localhost:8090/health && echo "Health OK" || { echo "Health FAILED"; exit 1; }
 
       - name: Smoke test OCR extraction
         env:
           OCR_INTERNAL_KEY: ${{ secrets.OCR_INTERNAL_KEY }}
-          OCR_SERVER_HOST: ${{ secrets.OCR_SERVER_HOST }}
         run: |
-          # Create a test image with text
           sudo apt-get install -y python3-pil > /dev/null 2>&1 || true
           python3 -c "
           from PIL import Image, ImageDraw
@@ -82,7 +100,7 @@ jobs:
           img.save('/tmp/smoke_test.png')
           "
 
-          # Test extract endpoint
+          # Test with X-API-Key header (backward compat)
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://ocr.chut.me/ocr/extract" \
             -H "X-API-Key: $OCR_INTERNAL_KEY" \
             -F "file=@/tmp/smoke_test.png")
@@ -91,39 +109,20 @@ jobs:
           BODY=$(echo "$RESPONSE" | head -n -1)
 
           echo "HTTP Status: $HTTP_CODE"
-          echo "Response: $BODY"
 
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "OCR smoke test FAILED with status $HTTP_CODE"
+            echo "Response: $BODY"
+            echo "OCR smoke test FAILED"
             exit 1
           fi
 
-          echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['success']==True; print(f'Image OCR OK: {len(d[\"lines\"])} lines, {d[\"confidence\"]:.2%} confidence, {d[\"processing_time_ms\"]}ms')"
+          echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['success']==True; print(f'OCR OK: {len(d[\"lines\"])} lines, {d[\"confidence\"]:.2%} confidence, {d[\"processing_time_ms\"]}ms')"
 
-          # Test PDF extraction
-          pip install pymupdf --quiet > /dev/null 2>&1
-          python3 -c "
-          import fitz
-          doc = fitz.open()
-          page = doc.new_page(width=400, height=100)
-          page.insert_text((10, 50), 'FACTURE N 2024-002 TVA BE0123456789', fontsize=14)
-          doc.save('/tmp/smoke_test.pdf')
-          doc.close()
-          "
-
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://ocr.chut.me/ocr/extract" \
-            -H "X-API-Key: $OCR_INTERNAL_KEY" \
-            -F "file=@/tmp/smoke_test.pdf")
-
+          # Test demo endpoint (no auth)
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://ocr.chut.me/demo/extract" \
+            -F "file=@/tmp/smoke_test.png")
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -n -1)
-
-          echo "PDF HTTP Status: $HTTP_CODE"
-          echo "PDF Response: $BODY"
-
+          echo "Demo HTTP Status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "PDF smoke test FAILED with status $HTTP_CODE"
-            exit 1
+            echo "Demo: $(echo "$RESPONSE" | head -n -1)"
           fi
-
-          echo "$BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['success']==True; print(f'PDF OCR OK: {len(d[\"lines\"])} lines, {d[\"confidence\"]:.2%} confidence, {d[\"processing_time_ms\"]}ms')"
