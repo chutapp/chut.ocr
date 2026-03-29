@@ -1,0 +1,17 @@
+name: Add Gitea Deploy Key
+on:
+  workflow_dispatch:
+jobs:
+  add-key:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add key to GPU server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.OCR_SERVER_HOST }}
+          username: ${{ secrets.OCR_SERVER_USER }}
+          key: ${{ secrets.OCR_SERVER_SSH_KEY }}
+          script: |
+            echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC18TWec/TFtGIsh+d3DkS8OEKDkmr96W31xnlBhpwNz gitea-ci@optii.eu" >> /root/.ssh/authorized_keys
+            sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys
+            echo "Key added. Total keys: $(wc -l < /root/.ssh/authorized_keys)"
