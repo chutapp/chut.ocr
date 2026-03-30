@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+.git
+.gitignore
+.github
+.gitea
+.pytest_cache
+.ruff_cache
+*.egg-info
+dist
+.env
+nginx
+README.md
